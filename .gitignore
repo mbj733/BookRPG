@@ -23,7 +23,6 @@ Temp/
 hermes-verify-*.py
 
 # 内部运维/开发文档（本地维护用，随源仓库跟踪；发布副本通过 publish_release.py 排除）
-scripts/
 tests/_smoke_*
 
 # 编辑器/系统

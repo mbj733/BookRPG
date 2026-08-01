@@ -4,6 +4,7 @@
 绝不重读原文——省 token、响应快、行为稳定。
 """
 import json
+import re
 
 from . import llm
 from .state import GameState
@@ -48,6 +49,7 @@ SYSTEM_TEMPLATE = """【你是这本小说的世界引擎，扮演这个世界�
 - options 必须方向分歧：2~4 个，覆盖不同立场/不同风险/不同收益（如谨慎行事 vs 冒险激进 vs 另辟蹊径 vs 静观其变），让玩家有真正的抉择感。严禁同质化——不要写"去做X"和"小心地去做X"这种只差一个形容词的选项。至少一个选项有明显风险或代价。
 - state_changes 只在叙述中明确出现金钱/生命/资源变化行为（购买、奖励、损失、受伤等）时才填对应增减；否则必须为 {{}}。禁止无中生有地扣除或增加属性——例如玩家只是对话、观察、移动，就绝不能扣钱。
 - 玩家获得/失去重要物品、功法、装备、关系时，通过 state_changes 新增或更新对应属性（如 {{"背包": ["低级储物袋"], "功法": ["黄阶功法《焚决》"]}}）；失去/用完时将该属性设为 null（null=移除，状态栏将不再显示该属性）。属性在玩家拥有前不要出现在状态里。
+- 叙述中首次提到的重要人物（哪怕只是听说其名、得知其身份来历），必须通过 state_changes 在"关系"中登记（例："关系": {{"萧玄": "萧家先祖"}}）；主角获知新信息（身份、秘密、来历）时同步更新对应属性。状态必须实时反映主角当前所知与所有，不能滞后。
 - initial_state 仅在开局回合填写（其他回合必须为 null）：根据本书的世界观设计 4~8 个关键状态属性及初始值，不要套用固定模板。例：斗气玄幻书（生命、金钱、斗气、境界、灵魂感知、声望）；科幻悬疑书（生命、金钱、线索进度、信任度、体力）；宫廷权谋书（生命、金钱、权势、威望、人脉）。属性名用中文，初始值贴合原著开局设定。"""
 
 # 开局背景导入指令：先建立世界观认知，再引到起点（不直接叙述事件）
@@ -94,6 +96,12 @@ class Game:
         self.player = player
         self.player_desc = player_desc
         self.state = GameState(initial_state)
+        # 「待揭示」池：worldbook.state_template 里主角后期才知晓/获得的人物与功法物品。
+        # 开局不进入状态；剧情文本首次命中时由 _auto_reveal 自动登记（不依赖模型自觉）。
+        self.reveal_pool: dict = {}
+        tmpl = (worldbook.get("state_template") or {})
+        if isinstance(tmpl.get("待揭示"), dict):
+            self.reveal_pool = tmpl["待揭示"]
         self.history: list[dict] = []   # [{"role": "user"/"assistant", "content": ...}]
         self.summary: str = ""          # 长局压缩后的「前情提要」（旧存档无此字段 → 空）
         self.scene = ""
@@ -117,7 +125,7 @@ class Game:
         """
         self.history.append({"role": "user", "content": player_input})
         deep = any(kw in player_input for kw in DEEP_THINKING_KEYWORDS)
-        return self._step(deep=deep)
+        return self._step(deep=deep, player_input=player_input)
 
     # ---------- 内部 ----------
 
@@ -142,7 +150,7 @@ class Game:
             history=history or "（游戏刚开始）",
         )
 
-    def _step(self, opening: bool = False, deep: bool = False) -> dict:
+    def _step(self, opening: bool = False, deep: bool = False, player_input: str = "") -> dict:
         messages = [{"role": "system", "content": self._system_prompt()}]
         for m in self.history:
             messages.append({"role": m["role"], "content": m["content"]})
@@ -172,6 +180,10 @@ class Game:
             self.game_over = str(game_over)
 
         self.history.append({"role": "assistant", "content": narrative})
+        # 非开局回合：剧情文本首次提到「待揭示」人物/功法/物品 → 自动登记进状态。
+        # 开局背景会预告大量人物，不自动登记，避免泄露后期信息。
+        if not opening:
+            self._auto_reveal(f"{player_input}\n{narrative}")
         self._maybe_compress()
         return {
             "narrative": narrative,
@@ -180,6 +192,48 @@ class Game:
             "scene": self.scene,
             "game_over": self.game_over,
         }
+
+    def _auto_reveal(self, text: str) -> None:
+        """扫描本回合剧情文本（玩家输入 + 叙述），命中「待揭示」池条目 → 自动登记。
+
+        - 关系：人物名出现在文本 → 加入 state["关系"]（该人物首次被知晓）
+        - 列表属性（功法/物品/装备…）：条目名（含《书名号》内名）出现在文本 → 加入对应列表
+        人物名支持"常用名（别名）"拆解（如"药老（药尘）"命中"药老"或"药尘"任一即揭示）。
+        已登记的不重复追加。这是状态实时更新的兜底——即使模型忘记在
+        state_changes 里登记新人物，只要剧情中提到了，状态面板就会显示。
+        """
+        pool = self.reveal_pool or {}
+        rel = pool.get("关系")
+        if isinstance(rel, dict):
+            state_rel = self.state.data.get("关系")
+            if not isinstance(state_rel, dict):
+                state_rel = {}
+                self.state.data["关系"] = state_rel
+            for name, desc in rel.items():
+                if name in state_rel:
+                    continue  # 已揭示
+                # 匹配键：全名 + 括号内别名/常用名（"药老（药尘）"→"药老"、"药尘"）
+                keys = [name] + [p for p in re.split(r"[（）()]", name) if p and p != name]
+                if any(k and k in text for k in keys):
+                    state_rel[name] = desc
+                    print(f"[引擎] 自动揭示关系：{name}")
+        for key, items in pool.items():
+            if key == "关系" or not isinstance(items, list):
+                continue
+            lst = self.state.data.get(key)
+            if lst is None:
+                lst = []
+                self.state.data[key] = lst
+            elif not isinstance(lst, list):
+                continue
+            for item in items:
+                if not item:
+                    continue
+                # 匹配键：条目原文 + 《书名号》内的名字（叙述可能不带书名号）
+                keys = [item] + re.findall(r"《(.+?)》", item)
+                if any(k and k in text for k in keys) and item not in lst:
+                    lst.append(item)
+                    print(f"[引擎] 自动揭示 {key}：{item}")
 
     # ---------- 长局历史压缩 ----------
 
@@ -236,6 +290,7 @@ class Game:
         prompt.append({"role": "user", "content":
                        "请只返回一个 JSON 对象作为你的回复，不要输出任何其他内容。"
                        "注意：除非叙述中明确发生了消费/获得/受伤等行为，state_changes 必须为 {}。"
+                       "叙述中首次提到的重要人物记得在 state_changes 的\"关系\"中登记，首次获得的功法/物品记得登记进对应属性。"
                        "根据玩家最新输入推进剧情，叙述必须与上一段明显不同，严禁复述上一段内容。"})
         try:
             # max_tokens 是 reasoning 模型"推理+输出"的总预算，必须给足：
