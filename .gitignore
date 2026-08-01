@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# 打包产物（PyInstaller）
+build/
+dist/
+*.spec
+
+# 用户数据：书库（版权书/个人存档/导入缓存）——开源仓库绝不包含
+books/
+config.json
+
+# 版权测试素材（用户本地 EPUB/PDF/TXT 样本）
+*.epub
+*.pdf
+!tests/**/*.book
+
+# 临时/验证脚本
+Temp/
+hermes-verify-*.py
+
+# 内部运维/开发文档（本地维护用，随源仓库跟踪；发布副本通过 publish_release.py 排除）
+scripts/
+tests/_smoke_*
+
+# 编辑器/系统
+.vscode/
+.idea/
+Thumbs.db
