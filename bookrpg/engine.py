@@ -162,6 +162,21 @@ class Game:
         if not isinstance(options, list):
             options = [str(options)]
         options = [str(o) for o in options][:4]
+
+        # 模型偶发漏 options（JSON 合法但选项缺失/为空，实测存档1 出现）→ 重试一次，
+        # 纠正消息强调 options 必填。降级纯文本路径（_degraded）不重试（本就不是 JSON）。
+        if not options and not result.get("_degraded"):
+            print("[引擎] 模型未返回选项，重试一次…")
+            retry_msgs = list(messages)
+            retry_msgs.append({"role": "user", "content":
+                               "上次回复缺少 options 字段。请重新输出完整 JSON，"
+                               "options 必须是 2~4 个方向分歧的行动选项，禁止为空。"})
+            result = self._request_json(retry_msgs, opening=opening, deep=deep)
+            narrative = str(result.get("narrative", "")).strip()
+            options = result.get("options") or []
+            if not isinstance(options, list):
+                options = [str(options)]
+            options = [str(o) for o in options][:4]
         self.options = options  # 持久化供存档/读档
         scene = str(result.get("scene", "")).strip()
         game_over = result.get("game_over") or None
@@ -307,4 +322,5 @@ class Game:
                 "state_changes": {},
                 "scene": "",
                 "game_over": None,
+                "_degraded": True,  # 标记降级路径：_step 不对空 options 重试（本就不是 JSON）
             }

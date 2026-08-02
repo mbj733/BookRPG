@@ -71,7 +71,7 @@ class TestTurnLogic(unittest.TestCase):
         seq = [
             {"narrative": "开场", "options": ["a", "b"], "state_changes": {},
              "scene": "开场场景", "game_over": None},
-            {"narrative": "你花了钱", "options": [], "state_changes": {"金钱": -10},
+            {"narrative": "你花了钱", "options": ["a"], "state_changes": {"金钱": -10},
              "scene": "集市", "game_over": None},
         ]
         orig = llm.chat_json
@@ -201,6 +201,79 @@ class TestHistoryCompression(unittest.TestCase):
         turns = sum(1 for m in g.history if m["role"] == "user")
         self.assertLessEqual(turns, MAX_HISTORY_TURNS + 1)  # 不因失败停止截断
         self.assertIn("稳定的第一版", g.summary)  # 旧提要保留
+
+
+class TestOptionsFallback(unittest.TestCase):
+    """模型漏 options（JSON 合法但选项空）→ 自动重试一次（实测存档1 场景）。"""
+
+    TURN = {"narrative": "叙述", "options": ["a", "b"], "state_changes": {},
+            "scene": "s", "game_over": None}
+
+    def test_retry_when_options_empty(self):
+        """step 首次返回空 options → 重试一次，用第二次结果，history 只记一次。"""
+        g = make_game()
+        seq = [
+            dict(self.TURN),                                        # new_game
+            {"narrative": "叙述A", "options": [], "state_changes": {},
+             "scene": "s", "game_over": None},                      # step 首次：空选项
+            {"narrative": "叙述B", "options": ["选项1", "选项2"], "state_changes": {},
+             "scene": "s", "game_over": None},                      # step 重试
+        ]
+        orig = llm.chat_json
+        llm.chat_json = lambda msgs, **kw: seq.pop(0)
+        try:
+            g.new_game()
+            r = g.step("行动")
+        finally:
+            llm.chat_json = orig
+        self.assertEqual(r["options"], ["选项1", "选项2"])
+        self.assertEqual(g.history[-1]["content"], "叙述B")  # 叙述A 未入 history
+        self.assertEqual(len(g.history), 3)  # 开局叙述 + 玩家 + 叙述B
+
+    def test_no_retry_when_options_present(self):
+        """正常返回选项 → 不重试（每回合恰好 1 次调用）。"""
+        g = make_game()
+        calls = []
+        orig = llm.chat_json
+        llm.chat_json = lambda msgs, **kw: calls.append(1) or dict(self.TURN)
+        try:
+            g.new_game()
+            g.step("行动")
+        finally:
+            llm.chat_json = orig
+        self.assertEqual(len(calls), 2)  # new_game + step 各一次
+
+    def test_no_retry_on_degraded(self):
+        """降级路径（_degraded=True，纯文本）→ 不重试。"""
+        g = make_game()
+        calls = []
+        orig = llm.chat_json
+        llm.chat_json = lambda msgs, **kw: calls.append(1) or {
+            "narrative": "纯文本叙述", "options": [], "state_changes": {},
+            "scene": "s", "game_over": None, "_degraded": True}
+        try:
+            g.new_game()
+            r = g.step("行动")
+        finally:
+            llm.chat_json = orig
+        self.assertEqual(len(calls), 2)  # 不额外重试
+        self.assertEqual(r["options"], [])
+
+    def test_retry_accepts_empty_second_result(self):
+        """重试后仍空 → 接受空（不无限重试），不崩溃。"""
+        g = make_game()
+        calls = []
+        orig = llm.chat_json
+        llm.chat_json = lambda msgs, **kw: calls.append(1) or {
+            "narrative": "叙述", "options": [], "state_changes": {},
+            "scene": "s", "game_over": None}
+        try:
+            g.new_game()
+            r = g.step("行动")
+        finally:
+            llm.chat_json = orig
+        self.assertEqual(len(calls), 4)  # new_game(空→重试=2) + step(空→重试=2)
+        self.assertEqual(r["options"], [])
 
 
 if __name__ == "__main__":
