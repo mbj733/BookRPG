@@ -130,13 +130,33 @@ class TestRevealPool(unittest.TestCase):
         run_turn(g, "虚影开口：老夫药尘。")
         self.assertIn("药老（药尘）", g.state.to_dict().get("关系", {}))
 
-    def test_model_state_changes_still_apply(self):
-        """模型主动在 state_changes 登记关系时正常合并，不与自动揭示冲突。"""
+    def test_alias_dedup_against_existing(self):
+        """state 关系已有"药老"，待揭示"药老（药尘）"别名重叠 → 不重复登记（防双卡片）。"""
         g = make_game()
         run_turn(g, "开场。", opening=True)
-        run_turn(g, "剧情推进。", changes={"关系": {"云韵": "云岚宗宗主"}})
+        g.state.data["关系"]["药老"] = "戒指中的神秘灵魂"  # 模拟旧档已登记的键
+        g.reveal_pool.setdefault("关系", {})["药老（药尘）"] = "戒指中的神秘灵魂"
+        run_turn(g, "药尘开口说话。")
+        rel = g.state.to_dict()["关系"]
+        self.assertIn("药老", rel)
+        self.assertNotIn("药老（药尘）", rel)  # 别名重叠 → 视为同一人，不重复登记
+
+    def test_model_state_changes_still_apply(self):
+        """模型主动在 state_changes 登记名单内人物（萧玄在待揭示池）→ 正常合并，不与自动揭示冲突。"""
+        g = make_game()
+        run_turn(g, "开场。", opening=True)
+        run_turn(g, "剧情推进。", changes={"关系": {"萧玄": "萧家先祖"}})
         st = g.state.to_dict()
-        self.assertEqual(st["关系"]["云韵"], "云岚宗宗主")
+        self.assertEqual(st["关系"]["萧玄"], "萧家先祖")
+        self.assertIn("萧战", st["关系"])  # 原有关系保留
+
+    def test_fabricated_relation_blocked(self):
+        """模型 state_changes 登记名单外人物（编造）→ 被拦截，不进状态。"""
+        g = make_game()
+        run_turn(g, "开场。", opening=True)
+        run_turn(g, "剧情推进。", changes={"关系": {"云韵": "云岚宗大弟子，见证退婚"}})
+        st = g.state.to_dict()
+        self.assertNotIn("云韵", st["关系"])  # 编造人物被剔除
         self.assertIn("萧战", st["关系"])  # 原有关系保留
 
 

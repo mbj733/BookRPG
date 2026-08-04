@@ -276,5 +276,70 @@ class TestOptionsFallback(unittest.TestCase):
         self.assertEqual(r["options"], [])
 
 
+class TestSanitizeChanges(unittest.TestCase):
+    """编造人物拦截：state_changes 新增人物必须在角色档案/待揭示名单内。"""
+
+    BOOK = {
+        **FAKE_BOOK,
+        "characters": [
+            {"name": "药老（药尘）", "role": "配角", "relations": "萧炎之师"},
+            {"name": "萧薰儿/古薰儿", "role": "配角", "relations": "青梅竹马"},
+        ],
+    }
+
+    def make_game(self) -> Game:
+        g = Game(self.BOOK, player="主角")
+        g.reveal_pool["关系"] = {"萧玄": "萧家先祖"}
+        g.state.data["关系"] = {"萧战": "父亲"}
+        return g
+
+    def test_fabricated_character_blocked(self):
+        """编造人物（不在名单）→ 剔除，不固化进状态。"""
+        g = self.make_game()
+        changes = g._sanitize_state_changes({"关系": {"云韵": "云岚宗大弟子，见证退婚"}})
+        self.assertEqual(changes["关系"], {})
+        self.assertNotIn("云韵", g.state.to_dict()["关系"])
+
+    def test_known_character_allowed(self):
+        """名单内人物（角色档案/待揭示池）→ 正常登记。"""
+        g = self.make_game()
+        changes = g._sanitize_state_changes({"关系": {"药老（药尘）": "戒指中的灵魂", "萧玄": "萧家先祖"}})
+        self.assertIn("药老（药尘）", changes["关系"])
+        self.assertIn("萧玄", changes["关系"])
+
+    def test_slash_alias_matches_roster(self):
+        """斜杠别名（萧薰儿/古薰儿）→ 名单匹配通过。"""
+        g = self.make_game()
+        changes = g._sanitize_state_changes({"关系": {"古薰儿": "古族大小姐"}})
+        self.assertIn("古薰儿", changes["关系"])
+
+    def test_existing_key_allowed(self):
+        """state 已有键（含别名重叠）→ 放行。"""
+        g = self.make_game()
+        changes = g._sanitize_state_changes({"关系": {"萧战": "父亲（更新）"}})
+        self.assertIn("萧战", changes["关系"])
+
+    def test_non_relation_changes_unaffected(self):
+        """非关系变更（金钱等）→ 不受影响。"""
+        g = self.make_game()
+        changes = g._sanitize_state_changes({"金钱": -10, "关系": {"云韵": "编造"}})
+        self.assertEqual(changes["金钱"], -10)
+        self.assertEqual(changes["关系"], {})
+
+    def test_end_to_end_apply_blocked(self):
+        """step 全链路：编造人物被拦截，不进入 state。"""
+        g = self.make_game()
+        orig = llm.chat_json
+        llm.chat_json = lambda msgs, **kw: {
+            "narrative": "叙述", "options": ["a"], "state_changes": {"关系": {"云韵": "见证退婚"}},
+            "scene": "s", "game_over": None}
+        try:
+            g.step("行动")
+        finally:
+            llm.chat_json = orig
+        self.assertNotIn("云韵", g.state.to_dict()["关系"])
+        self.assertIn("萧战", g.state.to_dict()["关系"])  # 原有关系保留
+
+
 if __name__ == "__main__":
     unittest.main()

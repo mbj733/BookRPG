@@ -29,8 +29,8 @@ SYSTEM_TEMPLATE = """【你是这本小说的世界引擎，扮演这个世界�
 2. 结局条件自由：死亡、达成目标、重大抉择等都算结局，触发时 game_over 填结局描述文本
 3. 保持角色人设一致，玩家扮演的角色不能 OOC
 4. 状态变更必须与叙述一致（叙述里花了钱，state_changes 就要扣钱）
-5. 涉及原著角色时，姓名必须严格取自【角色档案】名单，严禁改名、张冠李戴或编造（例如把纳兰嫣然写成林浅雪、把药老写成药谷都是错误的）。角色间关系以档案描述为准，关系不明时宁可模糊带过，也不要编造关系。
-6. 每次玩家输入都必须产生新的剧情进展：推进事件、场景、对话或发现，严禁复述、重复或改述上一段叙述——即使玩家输入很简短或看似与当前场景无关，也要给出新的世界反应，而不是原地打转。
+5. 涉及原著角色时，姓名必须严格取自【角色档案】名单，严禁改名、张冠李戴或编造（例如把纳兰嫣然写成林浅雪、把药老写成药谷都是错误的）。角色间关系以档案描述为准，关系不明时宁可模糊带过，也不要编造关系。**出场人物必须符合当前剧情时间点**——严禁把原著中该阶段尚未出场/不该在场的人物写进场景（如退婚现场并无云韵），拿不准某人物是否在场时宁可完全不提；state_changes 的"关系"只登记当前剧情中真实出场或被明确提及的人物，严禁登记虚构人物。
+6. 每次玩家输入都必须产生新的剧情进展：推进事件、场景、对话或发现，严禁复述、重复或改述上一段叙述——即使玩家输入很简短或看似与当前场景无关，也要给出新的世界反应，而不是原地打转。同时**严禁重演更早轮次已发生过的旧桥段**：玩家问过的问题、回答过的对话、经历过的场景不得再次作为新发现/新提问出现；玩家角色必须保持已知信息与经历（人物身份、已回答的问题、已发生的事件），不得倒退或失忆——例如玩家已认识戒指中的药尘，就绝不能再让玩家问"你是谁"。
 
 【最近对话】
 {history}
@@ -46,7 +46,7 @@ SYSTEM_TEMPLATE = """【你是这本小说的世界引擎，扮演这个世界�
   "game_over": null
 }}
 说明：
-- options 必须方向分歧：2~4 个，覆盖不同立场/不同风险/不同收益（如谨慎行事 vs 冒险激进 vs 另辟蹊径 vs 静观其变），让玩家有真正的抉择感。严禁同质化——不要写"去做X"和"小心地去做X"这种只差一个形容词的选项。至少一个选项有明显风险或代价。
+- options 必须方向分歧：2~4 个，覆盖不同立场/不同风险/不同收益（如谨慎行事 vs 冒险激进 vs 另辟蹊径 vs 静观其变），让玩家有真正的抉择感。严禁同质化——不要写"去做X"和"小心地去做X"这种只差一个形容词的选项。至少一个选项有明显风险或代价。**选项必须是尚未发生的全新行动方向，严禁重复玩家已做过的事、已说过的话或叙述中已出现的内容（包括更早轮次）**。
 - state_changes 只在叙述中明确出现金钱/生命/资源变化行为（购买、奖励、损失、受伤等）时才填对应增减；否则必须为 {{}}。禁止无中生有地扣除或增加属性——例如玩家只是对话、观察、移动，就绝不能扣钱。
 - 玩家获得/失去重要物品、功法、装备、关系时，通过 state_changes 新增或更新对应属性（如 {{"背包": ["低级储物袋"], "功法": ["黄阶功法《焚决》"]}}）；失去/用完时将该属性设为 null（null=移除，状态栏将不再显示该属性）。属性在玩家拥有前不要出现在状态里。
 - 叙述中首次提到的重要人物（哪怕只是听说其名、得知其身份来历），必须通过 state_changes 在"关系"中登记（例："关系": {{"萧玄": "萧家先祖"}}）；主角获知新信息（身份、秘密、来历）时同步更新对应属性。状态必须实时反映主角当前所知与所有，不能滞后。
@@ -75,10 +75,18 @@ DEEP_THINKING_KEYWORDS = [
 
 # 长局历史压缩：超过 MAX_HISTORY_TURNS 轮（按玩家输入计数）时，
 # 把最早的轮次用 LLM 浓缩成一条「前情提要」存进 self.summary，
-# history 只保留最近 COMPRESS_KEEP_TURNS 轮——控制存档体积与内存，
+# history 只截断到最近 COMPRESS_KEEP_TURNS 轮——控制存档体积与内存，
 # 且与"绝不重读原文、只带最近 8 轮"的上下文原则一致。
 MAX_HISTORY_TURNS = 40
 COMPRESS_KEEP_TURNS = 20
+
+
+def _name_parts(name: str) -> list[str]:
+    """人物名的匹配键：全名 + 括号内/斜杠分隔的别名（"药老（药尘）"→"药老"、"药尘"；
+    "萧薰儿/古薰儿"→"萧薰儿"、"古薰儿"）。自动揭示与编造拦截共用。"""
+    keys = [name]
+    keys += [p for p in re.split(r"[（）()/]", name) if p and p != name]
+    return keys
 
 COMPRESS_PROMPT = """你是游戏前情提要摘要器。下面是玩家此前经历的部分对话轮次（玩家行动与叙述）。
 请用 200~400 字中文按时间顺序浓缩成「前情提要」，用于后续回合的背景回顾。
@@ -181,7 +189,7 @@ class Game:
         scene = str(result.get("scene", "")).strip()
         game_over = result.get("game_over") or None
 
-        self.state.apply(result.get("state_changes") or {})
+        self.state.apply(self._sanitize_state_changes(result.get("state_changes") or {}))
         if opening:
             # 开局状态：优先用导入时生成的角色面板模板，其次用模型 initial_state 兜底
             tmpl = (self.worldbook.get("state_template") or {}).get("属性")
@@ -214,8 +222,11 @@ class Game:
         - 关系：人物名出现在文本 → 加入 state["关系"]（该人物首次被知晓）
         - 列表属性（功法/物品/装备…）：条目名（含《书名号》内名）出现在文本 → 加入对应列表
         人物名支持"常用名（别名）"拆解（如"药老（药尘）"命中"药老"或"药尘"任一即揭示）。
-        已登记的不重复追加。这是状态实时更新的兜底——即使模型忘记在
-        state_changes 里登记新人物，只要剧情中提到了，状态面板就会显示。
+        已登记的不重复追加；**别名重叠去重**——state 关系里已有"药老"时，
+        待揭示的"药老（药尘）"视为同一人，不再重复登记（否则状态面板出现双卡片，
+        旧档继续玩 + 新待揭示池实测出现"药老"+"药老（药尘）"）。这是状态实时更新的
+        兜底——即使模型忘记在 state_changes 里登记新人物，只要剧情中提到了，
+        状态面板就会显示。
         """
         pool = self.reveal_pool or {}
         rel = pool.get("关系")
@@ -227,8 +238,11 @@ class Game:
             for name, desc in rel.items():
                 if name in state_rel:
                     continue  # 已揭示
-                # 匹配键：全名 + 括号内别名/常用名（"药老（药尘）"→"药老"、"药尘"）
-                keys = [name] + [p for p in re.split(r"[（）()]", name) if p and p != name]
+                keys = _name_parts(name)
+                # 别名去重：待揭示条目与 state 已有关系键别名重叠 → 同一人，跳过
+                name_set = set(keys)
+                if any(name_set & set(_name_parts(k)) for k in state_rel):
+                    continue
                 if any(k and k in text for k in keys):
                     state_rel[name] = desc
                     print(f"[引擎] 自动揭示关系：{name}")
@@ -249,6 +263,43 @@ class Game:
                 if any(k and k in text for k in keys) and item not in lst:
                     lst.append(item)
                     print(f"[引擎] 自动揭示 {key}：{item}")
+
+    def _known_character_names(self) -> set[str]:
+        """角色档案 + 待揭示池的人物名集合（含括号/斜杠别名拆解）。编造拦截的名单依据。"""
+        names: set[str] = set()
+        for c in self.worldbook.get("characters", []):
+            n = str(c.get("name", "")).strip()
+            if n:
+                names.update(_name_parts(n))
+        rel = self.reveal_pool.get("关系") or {}
+        for n in rel:
+            names.update(_name_parts(n))
+        return names
+
+    def _sanitize_state_changes(self, changes: dict) -> dict:
+        """拦截 state_changes 中编造的人物登记（防编造人物被状态固化）。
+
+        模型偶发在"关系"里登记原著中不存在/未出场的人物（如虚构"云韵见证退婚"，
+        实测存档1 出现）——新增人物名若不在【角色档案】∪【待揭示池】名单内，
+        剔除该条目并打印警告；state 已有的键（含别名重叠）放行。
+        人物真实但场景错误（名单内人物放错时间点）由提示词规则 5 约束，此处不拦。
+        """
+        if not isinstance(changes, dict):
+            return changes
+        rel = changes.get("关系")
+        if not isinstance(rel, dict):
+            return changes
+        known = self._known_character_names()
+        existing = set(self.state.data.get("关系", {}))
+        kept: dict = {}
+        for name, desc in rel.items():
+            parts = set(_name_parts(name))
+            if name in existing or parts & known or any(parts & set(_name_parts(k)) for k in existing):
+                kept[name] = desc
+            else:
+                print(f"[状态校验] 拦截编造人物登记：关系「{name}」不在角色档案/待揭示名单，已剔除")
+        changes["关系"] = kept
+        return changes
 
     # ---------- 长局历史压缩 ----------
 
